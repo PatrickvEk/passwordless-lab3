@@ -131,6 +131,96 @@ Use any of the methods outlined on [Deploy your app to Azure App Service](https:
 After you deploy it, browse to the web app. You should see the secret on the web page, and this time the Principal Used will show "App", since it ran under the context of the App Service. 
 The AppId of the MSI will be displayed. 
 
+
+
+## Automating key renewal
+Create an azure **automation account**. Make sure "Create Azure Run As Account" is set to yes. Create the account and wait for it to finish. 
+
+Go to **modules** and install the  **AzureRM.*KeyVault***  module.
+
+
+
+Go to your **keyvault** into the "**Access policies**" settings.
+
+Add your **automation principal** and grant **all permissions**.
+
+
+
+Go back to the **automation account** go to runbooks and create a powershell runbook.
+
+
+```powershell
+<#
+    .DESCRIPTION
+        Updates password in database and keyvault
+
+    .NOTES
+        AUTHOR: Patrick van EK
+        LASTEDIT: June 26, 2019
+#>
+
+param 
+( 
+    #[Parameter (Mandatory=$true)] 
+    [int] $passwordLength = 30, 
+    #[Parameter (Mandatory=$true)] 
+    [string]$databaseResourceGroup = 'meetup-shared',
+    #[Parameter (Mandatory=$true)] 
+    [string]$databaseName = 'meetup-shared',
+    #[Parameter (Mandatory=$true)] 
+    [string]$keyvaultName = 'pvekeyvaulttest',
+    #[Parameter (Mandatory=$true)] 
+    [string]$secretName = 'DatabasePassword'
+) 
+
+$ErrorActionPreference = 'Stop'
+
+$connectionName = "AzureRunAsConnection"
+try
+{
+    # Get the connection "AzureRunAsConnection "
+    $servicePrincipalConnection = Get-AutomationConnection -Name $connectionName         
+
+    "Logging in to Azure..."
+    Add-AzureRmAccount `
+        -ServicePrincipal `
+        -TenantId $servicePrincipalConnection.TenantId `
+        -ApplicationId $servicePrincipalConnection.ApplicationId `
+        -CertificateThumbprint $servicePrincipalConnection.CertificateThumbprint 
+
+        Write-Output "Generating password..."
+
+        # from azure gallery 'New-SecurePassword'
+
+        $generatedPassword = ([char[]]([char]33..[char]95) + ([char[]]([char]97..[char]126)) | Sort-Object {Get-Random})[0..($passwordLength-2)] -join ''
+        $newSecret = ConvertTo-SecureString -AsPlainText -Force $generatedPassword 
+
+        Write-Output "Setting password in server..."
+        Set-AzureRmSqlServer -ResourceGroupName $databaseResourceGroup -ServerName $databaseName -SqlAdministratorPassword $newSecret | out-null
+
+        Write-Output "Setting password in KeyVault..."
+        Set-AzureKeyVaultSecret -Name $secretName -SecretValue $newSecret -VaultName $keyvaultName | out-null
+
+
+        Write-Output "New password set in Server and KeyVault!"
+}
+catch {
+    if (!$servicePrincipalConnection)
+    {
+        $ErrorMessage = "Connection $connectionName not found."
+        throw $ErrorMessage
+    } else{
+        Write-Error -Message $_.Exception
+        throw $_.Exception
+    }
+}
+```
+
+
+
+You can now schedule this runbook to run regularly to rotate your keyvault passwords.
+
+
 ## Summary
 The web app was successfully able to get a secret at runtime from Azure Key Vault using your developer account during development, and using MSI when deployed to Azure, without any code change between local development environment and Azure. 
 As a result, you did not have to explicitly handle a service principal credential to authenticate to Azure AD to get a token to call Key Vault. You do not have to worry about renewing the service principal credential either, since MSI takes care of that.  
